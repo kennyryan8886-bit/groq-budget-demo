@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ten-cent gate</title>
+  <style>
+    :root { color-scheme: light; --ink: #10231f; --paper: #edf4ec; --line: #b9c8bf; --signal: #d64d31; --ok: #197052; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: var(--paper); color: var(--ink); font-family: Georgia, "Times New Roman", serif; }
+    main { width: min(760px, calc(100% - 32px)); margin: 0 auto; padding: 9vh 0 48px; }
+    header { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 28px; border-bottom: 2px solid var(--ink); padding-bottom: 20px; }
+    h1 { margin: 0; max-width: 520px; font-size: clamp(2.5rem, 8vw, 5.75rem); font-weight: 400; line-height: .88; letter-spacing: -.055em; }
+    .budget { text-align: right; font-family: ui-monospace, Consolas, monospace; }
+    .budget strong { display: block; font-size: 1.8rem; font-weight: 600; }
+    .meter { height: 10px; background: #d6e0d7; margin: 18px 0 8px; overflow: hidden; }
+    .meter span { display: block; width: 0; height: 100%; background: var(--ok); transition: width .25s ease, background .25s ease; }
+    .ledger { display: flex; justify-content: space-between; gap: 20px; font: .85rem/1.4 ui-monospace, Consolas, monospace; }
+    form { margin-top: 44px; }
+    label { display: block; margin-bottom: 10px; font-size: 1.1rem; }
+    textarea { width: 100%; min-height: 132px; resize: vertical; border: 1px solid var(--line); border-bottom: 3px solid var(--ink); border-radius: 0; background: rgba(255,255,255,.58); color: inherit; padding: 18px; font: 1.1rem/1.5 system-ui, sans-serif; }
+    textarea:focus { outline: 3px solid rgba(25,112,82,.26); outline-offset: 2px; }
+    button { margin-top: 14px; border: 0; background: var(--ink); color: white; padding: 13px 22px; font: 600 1rem system-ui, sans-serif; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    #status { min-height: 24px; margin: 16px 0; font: .95rem/1.45 system-ui, sans-serif; color: var(--signal); }
+    #reply { white-space: pre-wrap; border-left: 4px solid var(--ok); padding: 2px 0 2px 18px; font-size: 1.2rem; line-height: 1.55; }
+    .note { margin-top: 52px; padding-top: 14px; border-top: 1px solid var(--line); font: .83rem/1.5 system-ui, sans-serif; color: #40534d; }
+    @media (max-width: 560px) { header { grid-template-columns: 1fr; } .budget { text-align: left; } .ledger { flex-direction: column; gap: 2px; } }
+    @media (prefers-reduced-motion: reduce) { .meter span { transition: none; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Ten-cent gate</h1>
+      <div class="budget"><span>session ceiling</span><strong>$0.10</strong></div>
+    </header>
+    <div class="meter" aria-hidden="true"><span id="bar"></span></div>
+    <div class="ledger"><span id="spent">spent $0.000000</span><span id="remaining">available $0.100000</span></div>
+
+    <form id="chat-form">
+      <label for="message">Message Groq</label>
+      <textarea id="message" maxlength="6000" required placeholder="Ask something concise…"></textarea>
+      <button id="send" type="submit">Reserve budget and send</button>
+    </form>
+    <div id="status" role="status" aria-live="polite"></div>
+    <div id="reply" hidden></div>
+    <p class="note">Demo only. Spend is held in this Python process and disappears on restart. It is intentionally conservative, not a durable billing ledger.</p>
+  </main>
+  <script>
+    const sessionId = sessionStorage.demoSessionId || crypto.randomUUID().replaceAll('-', '');
+    sessionStorage.demoSessionId = sessionId;
+    const form = document.querySelector('#chat-form');
+    const message = document.querySelector('#message');
+    const send = document.querySelector('#send');
+    const status = document.querySelector('#status');
+    const reply = document.querySelector('#reply');
+
+    function dollars(micros) { return `$${(micros / 1_000_000).toFixed(6)}`; }
+    function paint(data) {
+      const spent = data.spent_micros || 0;
+      const budget = data.budget_micros || 100000;
+      document.querySelector('#spent').textContent = `spent ${dollars(spent)}`;
+      document.querySelector('#remaining').textContent = `available ${dollars(data.remaining_micros ?? budget)}`;
+      const percent = Math.min(100, (spent / budget) * 100);
+      const bar = document.querySelector('#bar');
+      bar.style.width = `${percent}%`;
+      bar.style.background = percent > 80 ? 'var(--signal)' : 'var(--ok)';
+    }
+
+    async function readJson(response) {
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (data.detail && typeof data.detail === 'object') paint(data.detail);
+        throw new Error(typeof data.detail === 'string' ? data.detail : data.detail?.message || `Request failed (${response.status})`);
+      }
+      return data;
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      send.disabled = true;
+      status.textContent = 'Reserving worst-case cost before the request…';
+      reply.hidden = true;
+      try {
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sessionId, message: message.value })
+        });
+        const data = await readJson(response);
+        paint(data);
+        reply.textContent = data.reply;
+        reply.hidden = false;
+        status.textContent = data.usage_estimated ? 'Usage was unknown; the full reservation was charged.' : 'Usage reported; reservation settled.';
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        send.disabled = false;
+      }
+    });
+
+    fetch(`/api/spend/${sessionId}`).then(readJson).then(paint).catch(() => {});
+  </script>
+</body>
+</html>
